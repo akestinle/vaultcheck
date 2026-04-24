@@ -21,6 +21,7 @@ func NewRandomGenerator(byteLength int) (*RandomGenerator, error) {
 }
 
 // Generate returns a map with a single "value" key containing a random secret.
+// The secret is base64 URL-encoded, making it safe for use in URLs and HTTP headers.
 func (g *RandomGenerator) Generate(_ string) (map[string]interface{}, error) {
 	buf := make([]byte, g.ByteLength)
 	if _, err := rand.Read(buf); err != nil {
@@ -29,4 +30,14 @@ func (g *RandomGenerator) Generate(_ string) (map[string]interface{}, error) {
 	return map[string]interface{}{
 		"value": base64.URLEncoding.EncodeToString(buf),
 	}, nil
+}
+
+// GenerateRaw returns a raw random byte slice of the configured length.
+// This is useful when callers need the bytes directly rather than a map.
+func (g *RandomGenerator) GenerateRaw() ([]byte, error) {
+	buf := make([]byte, g.ByteLength)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, fmt.Errorf("rand.Read: %w", err)
+	}
+	return buf, nil
 }
