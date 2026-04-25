@@ -43,3 +43,13 @@ func (r Report) WriteTable(w io.Writer) error {
 	}
 	return tw.Flush()
 }
+
+// Summary returns a brief human-readable string describing the report,
+// useful for logging or CLI output headers.
+func (r Report) Summary() string {
+	return fmt.Sprintf("mount=%s paths=%d generated_at=%s",
+		r.Mount,
+		r.TotalPaths,
+		r.GeneratedAt.Format(time.RFC3339),
+	)
+}
