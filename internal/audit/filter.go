@@ -1,12 +1,12 @@
 package audit
 
 import (
-	"path"
 	"regexp"
+	"strings"
 	"time"
 )
 
-// FilterOptions controls which secrets are included in a scan result.
+// FilterOptions controls which secrets are included in audit results.
 type FilterOptions struct {
 	PathPrefix  string
 	KeyPattern  string
@@ -14,16 +14,18 @@ type FilterOptions struct {
 	ExcludePaths []string
 }
 
-// Filter applies the given options to a slice of SecretMeta and returns
-// only the entries that match all specified criteria.
-func Filter(secrets []SecretMeta, opts FilterOptions) []SecretMeta {
-	var out []SecretMeta
-
-	var keyRe *regexp.Regexp
+// Filter applies FilterOptions to a slice of SecretMeta, returning only matching entries.
+func Filter(secrets []SecretMeta, opts FilterOptions) ([]SecretMeta, error) {
+	var re *regexp.Regexp
 	if opts.KeyPattern != "" {
-		keyRe = regexp.MustCompile(opts.KeyPattern)
+		var err error
+		re, err = regexp.Compile(opts.KeyPattern)
+		if err != nil {
+			return nil, err
+		}
 	}
 
+	var out []SecretMeta
 	for _, s := range secrets {
 		if opts.PathPrefix != "" && !matchPrefix(s.Path, opts.PathPrefix) {
 			continue
@@ -31,7 +33,7 @@ func Filter(secrets []SecretMeta, opts FilterOptions) []SecretMeta {
 		if isExcluded(s.Path, opts.ExcludePaths) {
 			continue
 		}
-		if keyRe != nil && !keyRe.MatchString(s.Key) {
+		if re != nil && !re.MatchString(s.Key) {
 			continue
 		}
 		if opts.MaxAgeDays > 0 && !s.UpdatedAt.IsZero() {
@@ -42,20 +44,19 @@ func Filter(secrets []SecretMeta, opts FilterOptions) []SecretMeta {
 		}
 		out = append(out, s)
 	}
-	return out
+	return out, nil
 }
 
-func matchPrefix(p, prefix string) bool {
-	matched, err := path.Match(prefix+"*", p)
-	if err != nil {
-		return false
+func matchPrefix(path, prefix string) bool {
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
 	}
-	return matched
+	return strings.HasPrefix(path, prefix) || path == strings.TrimSuffix(prefix, "/")
 }
 
-func isExcluded(p string, excludes []string) bool {
+func isExcluded(path string, excludes []string) bool {
 	for _, ex := range excludes {
-		if ex == p {
+		if matchPrefix(path, ex) || path == ex {
 			return true
 		}
 	}

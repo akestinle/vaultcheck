@@ -16,20 +16,14 @@ type SecretMeta struct {
 	UpdatedAt time.Time
 }
 
-// VaultLister is the minimal Vault client interface required by Scanner.
-type VaultLister interface {
-	List(path string) (*vaultapi.Secret, error)
-	Read(path string) (*vaultapi.Secret, error)
-}
-
-// Scanner walks a Vault KV mount and collects SecretMeta entries.
+// Scanner walks Vault KV paths and collects secret metadata.
 type Scanner struct {
-	client VaultLister
+	client *vaultapi.Client
 	mount  string
 }
 
-// NewScanner creates a Scanner for the given KV mount path.
-func NewScanner(client VaultLister, mount string) (*Scanner, error) {
+// NewScanner creates a Scanner for the given Vault client and KV mount point.
+func NewScanner(client *vaultapi.Client, mount string) (*Scanner, error) {
 	if client == nil {
 		return nil, fmt.Errorf("vault client must not be nil")
 	}
@@ -39,66 +33,67 @@ func NewScanner(client VaultLister, mount string) (*Scanner, error) {
 	return &Scanner{client: client, mount: mount}, nil
 }
 
-// Scan recursively lists the mount and returns all discovered secrets.
-func (s *Scanner) Scan(ctx context.Context) ([]SecretMeta, error) {
-	return s.walk(ctx, s.mount+"/")
-}
-
-func (s *Scanner) walk(ctx context.Context, prefix string) ([]SecretMeta, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-
-	secret, err := s.client.List(prefix)
-	if err != nil {
-		return nil, fmt.Errorf("list %q: %w", prefix, err)
-	}
-	if secret == nil {
-		return nil, nil
-	}
-
-	keys, ok := secret.Data["keys"].([]interface{})
-	if !ok {
-		return nil, nil
-	}
-
+// Scan lists all secrets under the given root path and returns their metadata.
+func (s *Scanner) Scan(ctx context.Context, root string) ([]SecretMeta, error) {
 	var results []SecretMeta
-	for _, raw := range keys {
-		k, _ := raw.(string)
-		if strings.HasSuffix(k, "/") {
-			sub, err := s.walk(ctx, prefix+k)
-			if err != nil {
-				return nil, err
-			}
-			results = append(results, sub...)
-			continue
-		}
-		meta, err := s.readMeta(prefix + k)
-		if err != nil {
-			return nil, err
-		}
-		results = append(results, meta...)
+	if err := s.walk(ctx, root, &results); err != nil {
+		return nil, err
 	}
 	return results, nil
 }
 
-func (s *Scanner) readMeta(fullPath string) ([]SecretMeta, error) {
-	secret, err := s.client.Read(fullPath)
+func (s *Scanner) walk(ctx context.Context, path string, out *[]SecretMeta) error {
+	listPath := fmt.Sprintf("%s/metadata/%s", s.mount, path)
+	secret, err := s.client.Logical().ListWithContext(ctx, listPath)
 	if err != nil {
-		return nil, fmt.Errorf("read %q: %w", fullPath, err)
+		return fmt.Errorf("listing %s: %w", listPath, err)
 	}
-	if secret == nil {
+	if secret == nil || secret.Data == nil {
+		return nil
+	}
+	keys, ok := secret.Data["keys"].([]interface{})
+	if !ok {
+		return nil
+	}
+	for _, k := range keys {
+		name, _ := k.(string)
+		if strings.HasSuffix(name, "/") {
+			subPath := strings.TrimSuffix(path+"/"+strings.TrimSuffix(name, "/"), "/")
+			if err := s.walk(ctx, subPath, out); err != nil {
+				return err
+			}
+			continue
+		}
+		meta, err := s.readMeta(ctx, path+"/"+name)
+		if err != nil {
+			return err
+		}
+		*out = append(*out, meta...)
+	}
+	return nil
+}
+
+func (s *Scanner) readMeta(ctx context.Context, path string) ([]SecretMeta, error) {
+	readPath := fmt.Sprintf("%s/metadata/%s", s.mount, path)
+	secret, err := s.client.Logical().ReadWithContext(ctx, readPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading metadata %s: %w", readPath, err)
+	}
+	if secret == nil || secret.Data == nil {
 		return nil, nil
 	}
-	var metas []SecretMeta
-	for k := range secret.Data {
-		metas = append(metas, SecretMeta{
-			Path:      fullPath,
-			Key:       k,
-			UpdatedAt: time.Now(),
-		})
+	var updatedAt time.Time
+	if v, ok := secret.Data["updated_time"].(string); ok {
+		updatedAt, _ = time.Parse(time.RFC3339Nano, v)
 	}
-	return metas, nil
+	var keys []SecretMeta
+	if versions, ok := secret.Data["versions"].(map[string]interface{}); ok {
+		_ = versions // version details available if needed
+	}
+	keys = append(keys, SecretMeta{
+		Path:      s.mount + "/" + path,
+		Key:       path[strings.LastIndex(path, "/")+1:],
+		UpdatedAt: updatedAt,
+	})
+	return keys, nil
 }
