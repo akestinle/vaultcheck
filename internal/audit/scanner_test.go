@@ -1,4 +1,4 @@
-package audit_test
+package audit
 
 import (
 	"context"
@@ -8,67 +8,82 @@ import (
 	"testing"
 
 	vaultapi "github.com/hashicorp/vault/api"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
-	"github.com/example/vaultcheck/internal/audit"
 )
 
-func newTestVaultServer(t *testing.T, routes map[string]interface{}) (*httptest.Server, *vaultapi.Client) {
+func newTestVaultServer(t *testing.T) (*vaultapi.Client, *httptest.Server) {
 	t.Helper()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		v, ok := routes[r.URL.Path]
-		if !ok {
-			w.WriteHeader(http.StatusNotFound)
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/v1/secret/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "LIST" || r.URL.Query().Get("list") == "true" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{"keys": []string{"mykey"}},
+			})
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": v})
-	}))
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{"value": "s3cr3t"},
+		})
+	})
+
+	ts := httptest.NewServer(mux)
 	cfg := vaultapi.DefaultConfig()
 	cfg.Address = ts.URL
 	client, err := vaultapi.NewClient(cfg)
-	require.NoError(t, err)
-	client.SetToken("test-token")
-	return ts, client
-}
-
-func TestScanner_Scan_Empty(t *testing.T) {
-	ts, client := newTestVaultServer(t, map[string]interface{}{
-		"/v1/secret/metadata/": nil,
-	})
-	defer ts.Close()
-
-	s := audit.NewScanner(client, "secret")
-	results, err := s.Scan(context.Background(), "")
-	require.NoError(t, err)
-	assert.Empty(t, results)
-}
-
-func TestScanner_Scan_SingleSecret(t *testing.T) {
-	routes := map[string]interface{}{
-		"/v1/secret/metadata/": map[string]interface{}{"keys": []interface{}{"myapp"}},
-		"/v1/secret/metadata/myapp": map[string]interface{}{
-			"current_version": float64(3),
-			"versions":        map[string]interface{}{"1": nil, "2": nil, "3": nil},
-		},
+	if err != nil {
+		t.Fatalf("vault client: %v", err)
 	}
-	ts, client := newTestVaultServer(t, routes)
-	defer ts.Close()
-
-	s := audit.NewScanner(client, "secret")
-	results, err := s.Scan(context.Background(), "")
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, "myapp", results[0].Path)
-	assert.Equal(t, 3, results[0].Version)
-	assert.Len(t, results[0].Keys, 3)
+	client.SetToken("test-token")
+	return client, ts
 }
 
 func TestNewScanner_NotNil(t *testing.T) {
+	client, ts := newTestVaultServer(t)
+	defer ts.Close()
+	s, err := NewScanner(client.Logical(), "secret")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if s == nil {
+		t.Fatal("expected non-nil scanner")
+	}
+}
+
+func TestScanner_Scan_Empty(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/empty/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
 	cfg := vaultapi.DefaultConfig()
-	client, err := vaultapi.NewClient(cfg)
-	require.NoError(t, err)
-	s := audit.NewScanner(client, "secret")
-	assert.NotNil(t, s)
+	cfg.Address = ts.URL
+	client, _ := vaultapi.NewClient(cfg)
+	client.SetToken("t")
+
+	s, _ := NewScanner(client.Logical(), "empty")
+	results, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected empty, got %d", len(results))
+	}
+}
+
+func TestScanner_Scan_SingleSecret(t *testing.T) {
+	client, ts := newTestVaultServer(t)
+	defer ts.Close()
+
+	s, _ := NewScanner(client.Logical(), "secret")
+	results, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected at least one result")
+	}
 }

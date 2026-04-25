@@ -9,83 +9,96 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
-// SecretMeta holds metadata about a secret found during a scan.
+// SecretMeta holds metadata about a single secret key discovered in Vault.
 type SecretMeta struct {
 	Path      string
-	Keys      []string
-	CreatedAt time.Time
+	Key       string
 	UpdatedAt time.Time
-	Version   int
 }
 
-// Scanner walks Vault KV paths and collects secret metadata.
+// VaultLister is the minimal Vault client interface required by Scanner.
+type VaultLister interface {
+	List(path string) (*vaultapi.Secret, error)
+	Read(path string) (*vaultapi.Secret, error)
+}
+
+// Scanner walks a Vault KV mount and collects SecretMeta entries.
 type Scanner struct {
-	client *vaultapi.Client
+	client VaultLister
 	mount  string
 }
 
-// NewScanner creates a Scanner for the given KV mount (e.g. "secret").
-func NewScanner(client *vaultapi.Client, mount string) *Scanner {
-	return &Scanner{client: client, mount: mount}
+// NewScanner creates a Scanner for the given KV mount path.
+func NewScanner(client VaultLister, mount string) (*Scanner, error) {
+	if client == nil {
+		return nil, fmt.Errorf("vault client must not be nil")
+	}
+	if mount == "" {
+		mount = "secret"
+	}
+	return &Scanner{client: client, mount: mount}, nil
 }
 
-// Scan recursively lists all secrets under basePath and returns their metadata.
-func (s *Scanner) Scan(ctx context.Context, basePath string) ([]SecretMeta, error) {
+// Scan recursively lists the mount and returns all discovered secrets.
+func (s *Scanner) Scan(ctx context.Context) ([]SecretMeta, error) {
+	return s.walk(ctx, s.mount+"/")
+}
+
+func (s *Scanner) walk(ctx context.Context, prefix string) ([]SecretMeta, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	secret, err := s.client.List(prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list %q: %w", prefix, err)
+	}
+	if secret == nil {
+		return nil, nil
+	}
+
+	keys, ok := secret.Data["keys"].([]interface{})
+	if !ok {
+		return nil, nil
+	}
+
 	var results []SecretMeta
-	if err := s.walk(ctx, basePath, &results); err != nil {
-		return nil, err
+	for _, raw := range keys {
+		k, _ := raw.(string)
+		if strings.HasSuffix(k, "/") {
+			sub, err := s.walk(ctx, prefix+k)
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, sub...)
+			continue
+		}
+		meta, err := s.readMeta(prefix + k)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, meta...)
 	}
 	return results, nil
 }
 
-func (s *Scanner) walk(ctx context.Context, path string, out *[]SecretMeta) error {
-	listPath := fmt.Sprintf("%s/metadata/%s", s.mount, path)
-	secret, err := s.client.Logical().ListWithContext(ctx, listPath)
+func (s *Scanner) readMeta(fullPath string) ([]SecretMeta, error) {
+	secret, err := s.client.Read(fullPath)
 	if err != nil {
-		return fmt.Errorf("list %s: %w", listPath, err)
+		return nil, fmt.Errorf("read %q: %w", fullPath, err)
 	}
-	if secret == nil || secret.Data == nil {
-		return nil
+	if secret == nil {
+		return nil, nil
 	}
-	keys, ok := secret.Data["keys"].([]interface{})
-	if !ok {
-		return nil
+	var metas []SecretMeta
+	for k := range secret.Data {
+		metas = append(metas, SecretMeta{
+			Path:      fullPath,
+			Key:       k,
+			UpdatedAt: time.Now(),
+		})
 	}
-	for _, k := range keys {
-		key := fmt.Sprintf("%v", k)
-		child := strings.TrimSuffix(path+"/"+key, "/")
-		if strings.HasSuffix(key, "/") {
-			if err := s.walk(ctx, child, out); err != nil {
-				return err
-			}
-			continue
-		}
-		meta, err := s.readMeta(ctx, child)
-		if err != nil {
-			return err
-		}
-		*out = append(*out, meta)
-	}
-	return nil
-}
-
-func (s *Scanner) readMeta(ctx context.Context, path string) (SecretMeta, error) {
-	metaPath := fmt.Sprintf("%s/metadata/%s", s.mount, path)
-	secret, err := s.client.Logical().ReadWithContext(ctx, metaPath)
-	if err != nil {
-		return SecretMeta{}, fmt.Errorf("read meta %s: %w", metaPath, err)
-	}
-	meta := SecretMeta{Path: path}
-	if secret != nil && secret.Data != nil {
-		if v, ok := secret.Data["current_version"].(float64); ok {
-			meta.Version = int(v)
-		}
-		if versions, ok := secret.Data["versions"].(map[string]interface{}); ok {
-			meta.Keys = make([]string, 0, len(versions))
-			for vk := range versions {
-				meta.Keys = append(meta.Keys, vk)
-			}
-		}
-	}
-	return meta, nil
+	return metas, nil
 }

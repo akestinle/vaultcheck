@@ -1,41 +1,34 @@
 package audit
 
 import (
+	"path"
 	"regexp"
-	"strings"
 	"time"
 )
 
-// FilterOptions controls which secrets are included in a filtered result.
+// FilterOptions controls which secrets are included in a scan result.
 type FilterOptions struct {
-	PathPrefix string
-	KeyPattern string
-	MaxAgeDays int
+	PathPrefix  string
+	KeyPattern  string
+	MaxAgeDays  int
 	ExcludePaths []string
 }
 
-// Filter applies FilterOptions to a slice of SecretMeta and returns matching entries.
-func Filter(secrets []SecretMeta, opts FilterOptions) ([]SecretMeta, error) {
+// Filter applies the given options to a slice of SecretMeta and returns
+// only the entries that match all specified criteria.
+func Filter(secrets []SecretMeta, opts FilterOptions) []SecretMeta {
+	var out []SecretMeta
+
 	var keyRe *regexp.Regexp
 	if opts.KeyPattern != "" {
-		var err error
-		keyRe, err = regexp.Compile(opts.KeyPattern)
-		if err != nil {
-			return nil, err
-		}
+		keyRe = regexp.MustCompile(opts.KeyPattern)
 	}
 
-	excludeSet := make(map[string]struct{}, len(opts.ExcludePaths))
-	for _, p := range opts.ExcludePaths {
-		excludeSet[p] = struct{}{}
-	}
-
-	var result []SecretMeta
 	for _, s := range secrets {
-		if _, excluded := excludeSet[s.Path]; excluded {
+		if opts.PathPrefix != "" && !matchPrefix(s.Path, opts.PathPrefix) {
 			continue
 		}
-		if opts.PathPrefix != "" && !strings.HasPrefix(s.Path, opts.PathPrefix) {
+		if isExcluded(s.Path, opts.ExcludePaths) {
 			continue
 		}
 		if keyRe != nil && !keyRe.MatchString(s.Key) {
@@ -47,7 +40,24 @@ func Filter(secrets []SecretMeta, opts FilterOptions) ([]SecretMeta, error) {
 				continue
 			}
 		}
-		result = append(result, s)
+		out = append(out, s)
 	}
-	return result, nil
+	return out
+}
+
+func matchPrefix(p, prefix string) bool {
+	matched, err := path.Match(prefix+"*", p)
+	if err != nil {
+		return false
+	}
+	return matched
+}
+
+func isExcluded(p string, excludes []string) bool {
+	for _, ex := range excludes {
+		if ex == p {
+			return true
+		}
+	}
+	return false
 }
