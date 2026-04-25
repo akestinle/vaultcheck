@@ -1,12 +1,13 @@
 package audit
 
 import (
+	"path"
 	"regexp"
 	"strings"
 	"time"
 )
 
-// FilterOptions controls which secrets are included in audit results.
+// FilterOptions controls which secrets are included in a scan result.
 type FilterOptions struct {
 	PathPrefix  string
 	KeyPattern  string
@@ -14,7 +15,8 @@ type FilterOptions struct {
 	ExcludePaths []string
 }
 
-// Filter applies FilterOptions to a slice of SecretMeta, returning only matching entries.
+// Filter applies FilterOptions to a slice of SecretMeta and returns only
+// the entries that satisfy all configured criteria.
 func Filter(secrets []SecretMeta, opts FilterOptions) ([]SecretMeta, error) {
 	var re *regexp.Regexp
 	if opts.KeyPattern != "" {
@@ -25,9 +27,14 @@ func Filter(secrets []SecretMeta, opts FilterOptions) ([]SecretMeta, error) {
 		}
 	}
 
+	cutoff := time.Time{}
+	if opts.MaxAgeDays > 0 {
+		cutoff = time.Now().UTC().AddDate(0, 0, -opts.MaxAgeDays)
+	}
+
 	var out []SecretMeta
 	for _, s := range secrets {
-		if opts.PathPrefix != "" && !matchPrefix(s.Path, opts.PathPrefix) {
+		if !matchPrefix(s.Path, opts.PathPrefix) {
 			continue
 		}
 		if isExcluded(s.Path, opts.ExcludePaths) {
@@ -36,27 +43,27 @@ func Filter(secrets []SecretMeta, opts FilterOptions) ([]SecretMeta, error) {
 		if re != nil && !re.MatchString(s.Key) {
 			continue
 		}
-		if opts.MaxAgeDays > 0 && !s.UpdatedAt.IsZero() {
-			cutoff := time.Now().AddDate(0, 0, -opts.MaxAgeDays)
-			if s.UpdatedAt.Before(cutoff) {
-				continue
-			}
+		if !cutoff.IsZero() && !s.UpdatedAt.IsZero() && s.UpdatedAt.Before(cutoff) {
+			continue
 		}
 		out = append(out, s)
 	}
 	return out, nil
 }
 
-func matchPrefix(path, prefix string) bool {
-	if !strings.HasSuffix(prefix, "/") {
-		prefix += "/"
+func matchPrefix(p, prefix string) bool {
+	if prefix == "" {
+		return true
 	}
-	return strings.HasPrefix(path, prefix) || path == strings.TrimSuffix(prefix, "/")
+	return strings.HasPrefix(p, prefix)
 }
 
-func isExcluded(path string, excludes []string) bool {
-	for _, ex := range excludes {
-		if matchPrefix(path, ex) || path == ex {
+func isExcluded(p string, excludes []string) bool {
+	for _, pattern := range excludes {
+		if matched, _ := path.Match(pattern, p); matched {
+			return true
+		}
+		if strings.HasPrefix(p, pattern) {
 			return true
 		}
 	}
