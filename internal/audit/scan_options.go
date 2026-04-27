@@ -40,3 +40,14 @@ func (o ScanOptions) toFilterOptions() FilterOptions {
 		AsOf:         o.effectiveAsOf(),
 	}
 }
+
+// IsExcluded reports whether the given path should be skipped according to
+// the ExcludePaths list.
+func (o ScanOptions) IsExcluded(path string) bool {
+	for _, excluded := range o.ExcludePaths {
+		if excluded == path {
+			return true
+		}
+	}
+	return false
+}
