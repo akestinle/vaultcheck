@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -55,6 +56,12 @@ func (ws *WebhookSink) Send(e Event) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
+		// Read up to 256 bytes of the response body to include in the error
+		// message, giving callers useful context without unbounded memory use.
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		if len(snippet) > 0 {
+			return fmt.Errorf("notify: webhook returned status %d: %s", resp.StatusCode, bytes.TrimSpace(snippet))
+		}
 		return fmt.Errorf("notify: webhook returned status %d", resp.StatusCode)
 	}
 	return nil
